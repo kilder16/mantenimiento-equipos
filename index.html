@@ -1140,22 +1140,25 @@ body {
       </div>
 
       <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:8px;">
-        <div class="photo-slot" id="photoSlot1" onclick="takePhoto(1)">
-          <input type="file" accept="image/*" id="photoInput1" onchange="handlePhoto(1,this)" style="display:none;">
+        <div class="photo-slot" id="photoSlot1" onclick="showPhotoChoice(1)">
+          <input type="file" accept="image/*" capture="environment" id="photoCam1" onchange="handlePhoto(1,this)" style="display:none;">
+          <input type="file" accept="image/*" id="photoGal1" onchange="handlePhoto(1,this)" style="display:none;">
           <div id="photoPreview1" class="photo-preview">
             <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#94A3B8" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21,15 16,10 5,21"/></svg>
             <div style="font-size:10px;color:#94A3B8;margin-top:4px;font-weight:600;">📷 EQUIPO</div>
           </div>
         </div>
-        <div class="photo-slot" id="photoSlot2" onclick="takePhoto(2)">
-          <input type="file" accept="image/*" id="photoInput2" onchange="handlePhoto(2,this)" style="display:none;">
+        <div class="photo-slot" id="photoSlot2" onclick="showPhotoChoice(2)">
+          <input type="file" accept="image/*" capture="environment" id="photoCam2" onchange="handlePhoto(2,this)" style="display:none;">
+          <input type="file" accept="image/*" id="photoGal2" onchange="handlePhoto(2,this)" style="display:none;">
           <div id="photoPreview2" class="photo-preview">
             <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#94A3B8" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21,15 16,10 5,21"/></svg>
             <div style="font-size:10px;color:#94A3B8;margin-top:4px;font-weight:600;">🏷️ CÓDIGO INV.</div>
           </div>
         </div>
-        <div class="photo-slot" id="photoSlot3" onclick="takePhoto(3)">
-          <input type="file" accept="image/*" id="photoInput3" onchange="handlePhoto(3,this)" style="display:none;">
+        <div class="photo-slot" id="photoSlot3" onclick="showPhotoChoice(3)">
+          <input type="file" accept="image/*" capture="environment" id="photoCam3" onchange="handlePhoto(3,this)" style="display:none;">
+          <input type="file" accept="image/*" id="photoGal3" onchange="handlePhoto(3,this)" style="display:none;">
           <div id="photoPreview3" class="photo-preview">
             <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#94A3B8" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21,15 16,10 5,21"/></svg>
             <div style="font-size:10px;color:#94A3B8;margin-top:4px;font-weight:600;">🔄 CAMBIO</div>
@@ -1163,6 +1166,24 @@ body {
         </div>
       </div>
       <div id="photoCount" style="font-size:11px;color:#64748B;text-align:center;">Toca para tomar foto o seleccionar de galería — Opcional</div>
+
+      <!-- PHOTO CHOICE MODAL -->
+      <div id="photoChoiceModal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);backdrop-filter:blur(4px);z-index:1000;align-items:flex-end;justify-content:center;padding:16px;">
+        <div style="background:white;border-radius:16px 16px 16px 16px;width:100%;max-width:400px;overflow:hidden;animation:modalIn 0.3s ease;">
+          <div style="padding:16px 20px;text-align:center;border-bottom:1px solid #E2E8F0;">
+            <div style="font-size:15px;font-weight:700;color:#1E293B;" id="photoChoiceTitle">Seleccionar foto</div>
+          </div>
+          <button onclick="chooseCamera()" style="width:100%;padding:14px 20px;border:none;background:white;font-size:15px;font-family:'DM Sans',sans-serif;color:#0057A8;font-weight:600;cursor:pointer;display:flex;align-items:center;gap:12px;border-bottom:1px solid #E2E8F0;">
+            <span style="font-size:22px;">📸</span> Tomar foto con cámara
+          </button>
+          <button onclick="chooseGallery()" style="width:100%;padding:14px 20px;border:none;background:white;font-size:15px;font-family:'DM Sans',sans-serif;color:#0057A8;font-weight:600;cursor:pointer;display:flex;align-items:center;gap:12px;border-bottom:1px solid #E2E8F0;">
+            <span style="font-size:22px;">🖼️</span> Seleccionar de galería / archivos
+          </button>
+          <button onclick="closePhotoChoice()" style="width:100%;padding:14px 20px;border:none;background:#F8FAFC;font-size:15px;font-family:'DM Sans',sans-serif;color:#EF4444;font-weight:600;cursor:pointer;">
+            Cancelar
+          </button>
+        </div>
+      </div>
     </div>
 
     <!-- SIGNATURE & CONFORMITY -->
@@ -2341,8 +2362,30 @@ const PHOTO_LABELS = { 1: '📷 EQUIPO', 2: '🏷️ CÓDIGO INV.', 3: '🔄 CAM
 const MAX_PHOTO_SIZE = 1600; // max dimension in px
 const PHOTO_QUALITY = 0.9; // JPEG quality
 
-function takePhoto(slot) {
-  document.getElementById('photoInput' + slot).click();
+let _photoSlotPending = 0;
+
+function showPhotoChoice(slot) {
+  // If already has photo, allow removing
+  if (APP_PHOTOS[slot]) return;
+  _photoSlotPending = slot;
+  const labels = {1:'📷 Equipo', 2:'🏷️ Código Inv.', 3:'🔄 Cambio'};
+  document.getElementById('photoChoiceTitle').textContent = 'Foto: ' + (labels[slot] || 'Foto');
+  const modal = document.getElementById('photoChoiceModal');
+  modal.style.display = 'flex';
+}
+
+function chooseCamera() {
+  closePhotoChoice();
+  document.getElementById('photoCam' + _photoSlotPending).click();
+}
+
+function chooseGallery() {
+  closePhotoChoice();
+  document.getElementById('photoGal' + _photoSlotPending).click();
+}
+
+function closePhotoChoice() {
+  document.getElementById('photoChoiceModal').style.display = 'none';
 }
 
 function handlePhoto(slot, input) {
