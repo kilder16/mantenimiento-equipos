@@ -2388,34 +2388,39 @@ async function attemptSend(url, payload) {
 
       // Verify: wait a moment then check if server actually received it
       submitBtn.innerHTML = '<div class="spinner" style="width:20px;height:20px;border-width:2px;margin:0;display:inline-block;vertical-align:middle;"></div> Verificando...';
-      await delay(3000);
+      await delay(4000);
 
       // Verify via GET (GAS allows CORS on GET with redirect:follow)
       try {
+        const verifyController = new AbortController();
+        const verifyTimeout = setTimeout(() => verifyController.abort(), 15000);
         const verifyResp = await fetch(url + '?action=verify&code=' + encodeURIComponent(payload['CÓDIGO_INVENTARIO'] || ''), {
           method: 'GET',
-          redirect: 'follow'
+          redirect: 'follow',
+          signal: verifyController.signal
         });
+        clearTimeout(verifyTimeout);
         const verifyData = await verifyResp.json();
-        if (verifyData.status === 'ok') {
+
+        if (verifyData.status === 'ok' && verifyData.found === true) {
           showToast('☁️ Registro enviado y verificado ✅');
           submitBtn.disabled = false;
           submitBtn.innerHTML = originalBtnHTML;
           return true;
+        } else {
+          // Server responded but code NOT found → POST didn't arrive
+          console.error('Verificación: registro no encontrado en servidor');
+          submitBtn.disabled = false;
+          submitBtn.innerHTML = originalBtnHTML;
+          return false; // will trigger queueForLater
         }
       } catch(verifyErr) {
-        // Verification failed but send might have worked
-        console.log('Verification unavailable:', verifyErr);
-        showToast('☁️ Registro enviado (sin verificación) ✅');
+        // Can't reach server at all → no internet / CORS issue
+        console.log('Verificación no disponible:', verifyErr);
         submitBtn.disabled = false;
         submitBtn.innerHTML = originalBtnHTML;
-        return true;
+        return false; // will trigger queueForLater
       }
-
-      showToast('☁️ Registro enviado ✅');
-      submitBtn.disabled = false;
-      submitBtn.innerHTML = originalBtnHTML;
-      return true;
 
     } catch(err) {
       console.error(`Intento ${attempt} falló:`, err);
