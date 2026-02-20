@@ -1314,7 +1314,6 @@ body {
     <button class="btn btn-outline" onclick="if(confirm('¿Borrar historial de sesión?')){APP.history=[];localStorage.removeItem('sedapal_history');document.getElementById('historyList').innerHTML='<div class=\'empty-state\'><h3>Sin registros aún</h3><p>Los equipos procesados aparecerán aquí</p></div>';document.getElementById('historyCount').textContent='0';showToast('🗑️ Historial borrado');}" style="font-size:11px;padding:4px 10px;">
       🗑️ Limpiar
     </button>
-    </div>
     <div id="historyList">
       <div class="empty-state">
         <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
@@ -1349,6 +1348,12 @@ body {
     <p id="errorMessage">Ha ocurrido un error.</p>
     <button class="btn btn-primary btn-block" onclick="closeModal()">Entendido</button>
   </div>
+</div>
+
+<!-- PENDING SYNC BAR -->
+<div id="pendingSyncBar" style="display:none;position:fixed;bottom:0;left:0;right:0;background:#FEF3C7;border-top:2px solid #F59E0B;padding:10px 16px;z-index:900;font-size:13px;color:#92400E;text-align:center;">
+  <span id="pendingSyncText">📤 1 registro pendiente de envío</span>
+  <button onclick="retrySendPending()" style="margin-left:8px;background:#F59E0B;color:white;border:none;padding:4px 12px;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;">Reintentar ahora</button>
 </div>
 
 <!-- TOAST -->
@@ -1485,6 +1490,7 @@ document.addEventListener('DOMContentLoaded', () => {
   initSignature();
   initTechSignature();
   initEventListeners();
+  updatePendingBar();
 });
 
 function initDate() {
@@ -2278,7 +2284,8 @@ function submitMaintenance() {
   renderHistory();
 
   const code = record.code;
-  document.getElementById('successMessage').textContent = `Equipo ${code} registrado como "${status}" por ${userName}.`;
+  const offlineMsg = !navigator.onLine ? '\n💾 Sin señal — Se enviará automáticamente al recuperar conexión.' : '';
+  document.getElementById('successMessage').textContent = `Equipo ${code} registrado como "${status}" por ${userName}.${offlineMsg}`;
   document.getElementById('successModal').classList.add('active');
 }
 
@@ -2287,7 +2294,17 @@ async function sendToGoogleSheets(record) {
   const url = APP.config.webhookUrl;
   if (!url) { showToast('⚠️ Configure la URL del Web App en ⚙️ Config'); return; }
 
-  // Build flat row with all fields
+  // Build payload
+  const payload = buildPayload(record);
+
+  // Try to send, if fails → queue locally
+  const sent = await attemptSend(url, payload);
+  if (!sent) {
+    queueForLater(payload);
+  }
+}
+
+function buildPayload(record) {
   const eq = record.equipment;
   const COLS = FIELD_GROUPS.flatMap(g => g.fields.map(f => f.key));
 
@@ -2297,13 +2314,11 @@ async function sendToGoogleSheets(record) {
     'CÓDIGO_INVENTARIO': record.code,
   };
 
-  // Add all equipment fields
   COLS.forEach(key => {
     const clean = key.replace(/ /g, '_');
     payload[clean] = findFieldValue(eq, key) || '';
   });
 
-  // Add maintenance info
   payload.CAMBIOS_REALIZADOS = record.changes.map(c => `${c.field}: ${c.original} → ${c.updated}`).join(' | ') || 'Sin cambios';
   payload.USUARIO_CONFORMIDAD = record.userName;
   payload.FICHA_CONFORMIDAD = record.userFicha;
@@ -2311,16 +2326,11 @@ async function sendToGoogleSheets(record) {
   payload.ESTADO_CONFORMIDAD = record.status;
   payload.OBSERVACIONES = record.observations || '';
   payload.TIENE_FIRMA = 'SÍ';
-
-  // Add photos as base64 (will be saved to Drive by Apps Script)
   payload.FOTO_EQUIPO = record.photos[1] || '';
   payload.FOTO_CODIGO = record.photos[2] || '';
   payload.FOTO_CAMBIO = record.photos[3] || '';
   payload.OBSERVACIONES_TECNICO = record.techObservations || '';
-
   payload.VALIDACION_SERIES = '';
-
-  // NEW v7: Survey, signatures, timing
   payload.ENCUESTA_TRATO = String(record.survey ? record.survey.trato : 0);
   payload.ENCUESTA_CONFORMIDAD = String(record.survey ? record.survey.conformidad : 0);
   payload.FIRMA_TECNICO = record.techSignature || '';
@@ -2329,38 +2339,153 @@ async function sendToGoogleSheets(record) {
   payload.HORA_FIN = new Date(record.timestamp).toLocaleString('es-PE');
   const durMin = record.startTime ? Math.round((new Date(record.timestamp) - new Date(record.startTime)) / 60000) : 0;
   payload.DURACION = durMin >= 60 ? Math.floor(durMin/60) + 'h ' + (durMin%60) + 'min' : durMin + 'min';
-
-  // PDF base64 from jsPDF (generated locally)
   payload.PDF_BASE64 = APP.lastPdfBase64 || '';
 
-  try {
-    // Send as JSON string via form-encoded POST
-    const payloadStr = JSON.stringify(payload);
+  return payload;
+}
 
-    const resp = await fetch(url, {
-      method: 'POST',
-      mode: 'no-cors',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: 'data=' + encodeURIComponent(payloadStr)
-    });
+async function attemptSend(url, payload) {
+  const submitBtn = document.getElementById('submitBtn');
+  const originalBtnHTML = submitBtn.innerHTML;
+  submitBtn.disabled = true;
+  submitBtn.innerHTML = '<div class="spinner" style="width:20px;height:20px;border-width:2px;margin:0;display:inline-block;vertical-align:middle;"></div> Enviando...';
 
-    showToast('☁️ Registro enviado a Google Sheets ✅');
-  } catch(err) {
-    console.error('Error sending to Sheets:', err);
-    showToast('⚠️ No se pudo enviar a Google Sheets');
+  // Check if online first
+  if (!navigator.onLine) {
+    submitBtn.disabled = false;
+    submitBtn.innerHTML = originalBtnHTML;
+    return false;
+  }
+
+  const TIMEOUT_MS = 60000;
+  const MAX_RETRIES = 2;
+
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     try {
-      const queue = JSON.parse(localStorage.getItem('sedapal_pending_sync') || '[]');
-      queue.push(payload);
-      localStorage.setItem('sedapal_pending_sync', JSON.stringify(queue));
-    } catch(e) {}
+      if (attempt > 1) {
+        submitBtn.innerHTML = '<div class="spinner" style="width:20px;height:20px;border-width:2px;margin:0;display:inline-block;vertical-align:middle;"></div> Reintentando...';
+        await delay(2000);
+      }
+
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_MS);
+
+      await fetch(url, {
+        method: 'POST',
+        mode: 'no-cors',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'data=' + encodeURIComponent(JSON.stringify(payload)),
+        signal: controller.signal
+      });
+
+      clearTimeout(timeoutId);
+      showToast('☁️ Registro enviado a Google Sheets ✅');
+      submitBtn.disabled = false;
+      submitBtn.innerHTML = originalBtnHTML;
+      return true;
+    } catch(err) {
+      console.error(`Intento ${attempt} falló:`, err);
+      if (attempt === MAX_RETRIES) {
+        submitBtn.disabled = false;
+        submitBtn.innerHTML = originalBtnHTML;
+        return false;
+      }
+    }
+  }
+  submitBtn.disabled = false;
+  submitBtn.innerHTML = originalBtnHTML;
+  return false;
+}
+
+// ===== OFFLINE QUEUE =====
+function queueForLater(payload) {
+  try {
+    const queue = JSON.parse(localStorage.getItem('sedapal_pending_sync') || '[]');
+    queue.push({ payload, queuedAt: new Date().toISOString() });
+    localStorage.setItem('sedapal_pending_sync', JSON.stringify(queue));
+    updatePendingBar();
+    showToast('💾 Sin señal — Registro guardado. Se enviará al recuperar conexión.');
+  } catch(e) {
+    console.error('Error saving to queue:', e);
   }
 }
+
+function updatePendingBar() {
+  const queue = JSON.parse(localStorage.getItem('sedapal_pending_sync') || '[]');
+  const bar = document.getElementById('pendingSyncBar');
+  const text = document.getElementById('pendingSyncText');
+  if (queue.length > 0) {
+    bar.style.display = 'block';
+    text.textContent = `📤 ${queue.length} registro${queue.length > 1 ? 's' : ''} pendiente${queue.length > 1 ? 's' : ''} de envío`;
+    document.querySelector('.main').style.paddingBottom = '140px';
+  } else {
+    bar.style.display = 'none';
+    document.querySelector('.main').style.paddingBottom = '100px';
+  }
+}
+
+async function retrySendPending() {
+  const url = APP.config.webhookUrl;
+  if (!url) { showToast('⚠️ Configure la URL del Web App primero'); return; }
+  if (!navigator.onLine) { showToast('📵 Aún sin conexión a internet'); return; }
+
+  const queue = JSON.parse(localStorage.getItem('sedapal_pending_sync') || '[]');
+  if (queue.length === 0) { showToast('✅ No hay registros pendientes'); updatePendingBar(); return; }
+
+  const bar = document.getElementById('pendingSyncText');
+  bar.textContent = `⏳ Enviando ${queue.length} registro${queue.length > 1 ? 's' : ''}...`;
+
+  let sent = 0;
+  const failed = [];
+
+  for (let i = 0; i < queue.length; i++) {
+    bar.textContent = `⏳ Enviando ${i + 1} de ${queue.length}...`;
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 60000);
+
+      await fetch(url, {
+        method: 'POST',
+        mode: 'no-cors',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'data=' + encodeURIComponent(JSON.stringify(queue[i].payload)),
+        signal: controller.signal
+      });
+
+      clearTimeout(timeoutId);
+      sent++;
+      await delay(1000); // small delay between sends
+    } catch(err) {
+      console.error('Retry send failed:', err);
+      failed.push(queue[i]);
+    }
+  }
+
+  localStorage.setItem('sedapal_pending_sync', JSON.stringify(failed));
+  updatePendingBar();
+
+  if (failed.length === 0) {
+    showToast(`✅ ${sent} registro${sent > 1 ? 's' : ''} enviado${sent > 1 ? 's' : ''} correctamente`);
+  } else {
+    showToast(`⚠️ ${sent} enviado${sent > 1 ? 's' : ''}, ${failed.length} aún pendiente${failed.length > 1 ? 's' : ''}`);
+  }
+}
+
+// Auto-sync when connection comes back
+window.addEventListener('online', () => {
+  showToast('📶 Conexión recuperada — Enviando pendientes...');
+  setTimeout(() => retrySendPending(), 3000);
+});
+
+window.addEventListener('offline', () => {
+  showToast('📵 Sin conexión a internet');
+});
 
 // ===== PHOTO HANDLING =====
 const APP_PHOTOS = { 1: null, 2: null, 3: null };
 const PHOTO_LABELS = { 1: '📷 EQUIPO', 2: '🏷️ CÓDIGO INV.', 3: '🔄 CAMBIO' };
-const MAX_PHOTO_SIZE = 1600; // max dimension in px
-const PHOTO_QUALITY = 0.9; // JPEG quality
+const MAX_PHOTO_SIZE = 1024; // max dimension in px (era 1600)
+const PHOTO_QUALITY = 0.7; // JPEG quality (era 0.9)
 
 let _photoSlotPending = 0;
 
@@ -2441,8 +2566,14 @@ function removePhoto(slot) {
   slotDiv.style.position = '';
   preview.innerHTML = `<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#94A3B8" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21,15 16,10 5,21"/></svg><div style="font-size:10px;color:#94A3B8;margin-top:4px;font-weight:600;">${PHOTO_LABELS[slot]}</div>`;
 
+  // Reset both file inputs
+  const camInput = document.getElementById('photoCam' + slot);
+  const galInput = document.getElementById('photoGal' + slot);
+  if (camInput) camInput.value = '';
+  if (galInput) galInput.value = '';
+
   const count = Object.values(APP_PHOTOS).filter(Boolean).length;
-  document.getElementById('photoCount').textContent = count > 0 ? `✅ ${count}/3 fotos` : 'Toca para tomar foto con la cámara — Opcional';
+  document.getElementById('photoCount').textContent = count > 0 ? `✅ ${count}/3 fotos` : 'Toca para tomar foto o seleccionar de galería — Opcional';
 }
 
 function resetPhotos() {
