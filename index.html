@@ -2233,7 +2233,7 @@ function undoTechSignature() {
 }
 
 // ===== SUBMIT =====
-function submitMaintenance() {
+async function submitMaintenance() {
   // Prevent double tap
   const submitBtn = document.getElementById('submitBtn');
   if (submitBtn.disabled) return;
@@ -2283,13 +2283,15 @@ function submitMaintenance() {
   // Generate PDF first (stores base64 in APP.lastPdfBase64)
   exportRecord();
 
-  // Send to Google Sheets if webhook configured (includes PDF base64)
-  sendToGoogleSheets(record);
+  // Send to Google Sheets — AWAIT to know if it succeeded or needs queue
+  await sendToGoogleSheets(record);
 
   renderHistory();
+  updatePendingBar();
 
   const code = record.code;
-  const offlineMsg = !navigator.onLine ? '\n💾 Sin señal — Se enviará automáticamente al recuperar conexión.' : '';
+  const pendingQueue = JSON.parse(localStorage.getItem('sedapal_pending_sync') || '[]');
+  const offlineMsg = pendingQueue.length > 0 ? '\n💾 Guardado en cola — Se enviará al recuperar señal.' : '';
   document.getElementById('successMessage').textContent = `Equipo ${code} registrado como "${status}" por ${userName}.${offlineMsg}`;
   document.getElementById('successModal').classList.add('active');
   submitBtn.disabled = false;
