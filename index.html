@@ -2287,24 +2287,13 @@ function submitMaintenance() {
   const payload = buildPayload(record);
   const queueId = Date.now() + '_' + Math.random().toString(36).substr(2, 6);
 
-  // Save LIGHTWEIGHT version (sin base64) — cada registro completo puede ser 2-4MB
-  // y localStorage tiene límite de 5MB, así que 2 registros ya no caben
-  const litePayload = { ...payload };
-  delete litePayload.PDF_BASE64;
-  delete litePayload.FIRMA_TECNICO;
-  delete litePayload.FIRMA_USUARIO;
-  litePayload.FOTO_EQUIPO = '';
-  litePayload.FOTO_CODIGO = '';
-  litePayload.FOTO_CAMBIO = '';
-
   try {
     const queue = JSON.parse(localStorage.getItem('sedapal_pending_sync') || '[]');
-    queue.push({ payload: litePayload, queuedAt: new Date().toISOString(), id: queueId });
+    queue.push({ payload, queuedAt: new Date().toISOString(), id: queueId });
     localStorage.setItem('sedapal_pending_sync', JSON.stringify(queue));
     updatePendingBar();
   } catch(e) {
     console.error('Cola llena:', e);
-    showToast('⚠️ Error guardando en cola local');
   }
 
   renderHistory();
