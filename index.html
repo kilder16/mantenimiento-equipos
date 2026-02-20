@@ -2302,14 +2302,35 @@ async function sendToGoogleSheets(record) {
   const url = APP.config.webhookUrl;
   if (!url) { showToast('⚠️ Configure la URL del Web App en ⚙️ Config'); return; }
 
-  // Build payload
   const payload = buildPayload(record);
 
-  // Try to send, if fails → queue locally
+  // ALWAYS save to local backup queue first
+  saveToBackupQueue(payload);
+
+  // Then try to send
   const sent = await attemptSend(url, payload);
-  if (!sent) {
-    queueForLater(payload);
+  if (sent) {
+    // Mark as sent in backup queue (remove it)
+    removeFromBackupQueue(payload);
   }
+  // If not sent, it stays in backup queue and will show yellow bar
+}
+
+function saveToBackupQueue(payload) {
+  try {
+    const queue = JSON.parse(localStorage.getItem('sedapal_pending_sync') || '[]');
+    payload._queueId = Date.now() + '_' + Math.random().toString(36).substr(2, 5);
+    queue.push({ payload, queuedAt: new Date().toISOString(), id: payload._queueId });
+    localStorage.setItem('sedapal_pending_sync', JSON.stringify(queue));
+  } catch(e) { console.error('Queue save error:', e); }
+}
+
+function removeFromBackupQueue(payload) {
+  try {
+    let queue = JSON.parse(localStorage.getItem('sedapal_pending_sync') || '[]');
+    queue = queue.filter(item => item.id !== payload._queueId);
+    localStorage.setItem('sedapal_pending_sync', JSON.stringify(queue));
+  } catch(e) { console.error('Queue remove error:', e); }
 }
 
 function buildPayload(record) {
@@ -2365,77 +2386,31 @@ async function attemptSend(url, payload) {
   }
 
   const TIMEOUT_MS = 90000;
-  const MAX_RETRIES = 2;
 
-  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-    try {
-      if (attempt > 1) {
-        submitBtn.innerHTML = '<div class="spinner" style="width:20px;height:20px;border-width:2px;margin:0;display:inline-block;vertical-align:middle;"></div> Reintentando...';
-        await delay(2000);
-      }
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_MS);
+    await fetch(url, {
+      method: 'POST',
+      mode: 'no-cors',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'data=' + encodeURIComponent(JSON.stringify(payload)),
+      signal: controller.signal
+    });
 
-      // Send via no-cors (GAS redirects break cors)
-      await fetch(url, {
-        method: 'POST',
-        mode: 'no-cors',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: 'data=' + encodeURIComponent(JSON.stringify(payload)),
-        signal: controller.signal
-      });
+    clearTimeout(timeoutId);
+    showToast('☁️ Registro enviado ✅');
+    submitBtn.disabled = false;
+    submitBtn.innerHTML = originalBtnHTML;
+    return true;
 
-      clearTimeout(timeoutId);
-
-      // Verify: wait a moment then check if server actually received it
-      submitBtn.innerHTML = '<div class="spinner" style="width:20px;height:20px;border-width:2px;margin:0;display:inline-block;vertical-align:middle;"></div> Verificando...';
-      await delay(4000);
-
-      // Verify via GET (GAS allows CORS on GET with redirect:follow)
-      try {
-        const verifyController = new AbortController();
-        const verifyTimeout = setTimeout(() => verifyController.abort(), 15000);
-        const verifyResp = await fetch(url + '?action=verify&code=' + encodeURIComponent(payload['CÓDIGO_INVENTARIO'] || ''), {
-          method: 'GET',
-          redirect: 'follow',
-          signal: verifyController.signal
-        });
-        clearTimeout(verifyTimeout);
-        const verifyData = await verifyResp.json();
-
-        if (verifyData.status === 'ok' && verifyData.found === true) {
-          showToast('☁️ Registro enviado y verificado ✅');
-          submitBtn.disabled = false;
-          submitBtn.innerHTML = originalBtnHTML;
-          return true;
-        } else {
-          // Server responded but code NOT found → POST didn't arrive
-          console.error('Verificación: registro no encontrado en servidor');
-          submitBtn.disabled = false;
-          submitBtn.innerHTML = originalBtnHTML;
-          return false; // will trigger queueForLater
-        }
-      } catch(verifyErr) {
-        // Can't reach server at all → no internet / CORS issue
-        console.log('Verificación no disponible:', verifyErr);
-        submitBtn.disabled = false;
-        submitBtn.innerHTML = originalBtnHTML;
-        return false; // will trigger queueForLater
-      }
-
-    } catch(err) {
-      console.error(`Intento ${attempt} falló:`, err);
-      if (attempt === MAX_RETRIES) {
-        submitBtn.disabled = false;
-        submitBtn.innerHTML = originalBtnHTML;
-        return false;
-      }
-    }
+  } catch(err) {
+    console.error('Envío falló:', err);
+    submitBtn.disabled = false;
+    submitBtn.innerHTML = originalBtnHTML;
+    return false;
   }
-  submitBtn.disabled = false;
-  submitBtn.innerHTML = originalBtnHTML;
-  return false;
 }
 
 // ===== OFFLINE QUEUE =====
