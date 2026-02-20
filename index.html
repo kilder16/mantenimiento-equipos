@@ -2283,58 +2283,39 @@ function submitMaintenance() {
   // Generate PDF first (stores base64 in APP.lastPdfBase64)
   exportRecord();
 
-  // Build payload and ALWAYS save to queue SYNCHRONOUSLY first
+  // Build payload and save to send queue
   const payload = buildPayload(record);
   const queueId = Date.now() + '_' + Math.random().toString(36).substr(2, 6);
-  payload._queueId = queueId;
+
+  // Save LIGHTWEIGHT version (sin base64) — cada registro completo puede ser 2-4MB
+  // y localStorage tiene límite de 5MB, así que 2 registros ya no caben
+  const litePayload = { ...payload };
+  delete litePayload.PDF_BASE64;
+  delete litePayload.FIRMA_TECNICO;
+  delete litePayload.FIRMA_USUARIO;
+  litePayload.FOTO_EQUIPO = '';
+  litePayload.FOTO_CODIGO = '';
+  litePayload.FOTO_CAMBIO = '';
 
   try {
     const queue = JSON.parse(localStorage.getItem('sedapal_pending_sync') || '[]');
-    queue.push({ payload, queuedAt: new Date().toISOString(), id: queueId });
+    queue.push({ payload: litePayload, queuedAt: new Date().toISOString(), id: queueId });
     localStorage.setItem('sedapal_pending_sync', JSON.stringify(queue));
     updatePendingBar();
-  } catch(e) {}
-
-  // Try to send in background (will remove from queue if successful)
-  trySendPayload(payload, queueId);
+  } catch(e) {
+    console.error('Cola llena:', e);
+    showToast('⚠️ Error guardando en cola local');
+  }
 
   renderHistory();
 
   const code = record.code;
-  document.getElementById('successMessage').textContent = `Equipo ${code} registrado como "${status}" por ${userName}.`;
+  document.getElementById('successMessage').textContent = `Equipo ${code} registrado como "${status}" por ${userName}.\n📤 Se enviará automáticamente.`;
   document.getElementById('successModal').classList.add('active');
   submitBtn.disabled = false;
-}
 
-// Background sender — tries to send and removes from queue on success
-async function trySendPayload(payload, queueId) {
-  const url = APP.config.webhookUrl;
-  if (!url) return;
-
-  const hasInternet = await checkRealConnection();
-  if (!hasInternet) {
-    showToast('💾 Sin señal — Guardado en cola.');
-    return;
-  }
-
-  try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 90000);
-
-    await fetch(url, {
-      method: 'POST',
-      mode: 'no-cors',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: 'data=' + encodeURIComponent(JSON.stringify(payload)),
-      signal: controller.signal
-    });
-
-    clearTimeout(timeoutId);
-    removeFromQueue(queueId);
-    showToast('☁️ Registro enviado ✅');
-  } catch(err) {
-    showToast('💾 En cola — Se reenviará automáticamente.');
-  }
+  // Try to send queue after a brief delay
+  setTimeout(() => retrySendPending(), 2000);
 }
 
 // sendToGoogleSheets is kept for compatibility but no longer used from submit
@@ -2441,46 +2422,63 @@ function updatePendingBar() {
 let _retryLock = false;
 
 async function retrySendPending() {
-  if (_retryLock) return; // prevent concurrent retries
+  if (_retryLock) return;
   _retryLock = true;
 
   const url = APP.config.webhookUrl;
-  if (!url) { showToast('⚠️ Configure la URL del Web App primero'); _retryLock = false; return; }
+  if (!url) { _retryLock = false; return; }
 
-  const hasInternet = await checkRealConnection();
-  if (!hasInternet) { showToast('📵 Aún sin conexión real a internet'); _retryLock = false; return; }
-
-  const queue = JSON.parse(localStorage.getItem('sedapal_pending_sync') || '[]');
-  if (queue.length === 0) { showToast('✅ No hay registros pendientes'); updatePendingBar(); _retryLock = false; return; }
+  let queue = JSON.parse(localStorage.getItem('sedapal_pending_sync') || '[]');
+  if (queue.length === 0) { updatePendingBar(); _retryLock = false; return; }
 
   const bar = document.getElementById('pendingSyncText');
-  bar.textContent = `⏳ Enviando ${queue.length} registro${queue.length > 1 ? 's' : ''}...`;
-
   let sent = 0;
 
   for (let i = 0; i < queue.length; i++) {
     bar.textContent = `⏳ Enviando ${i + 1} de ${queue.length}...`;
     try {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 90000);
+      const timeoutId = setTimeout(() => controller.abort(), 15000);
+
+      // Use a real fetch (not no-cors) to detect actual network failure
+      // Fetch to google.com will fail CORS but proves internet works
+      // If it throws TypeError/NetworkError, there's no internet
+      try {
+        await fetch('https://www.google.com/generate_204', {
+          method: 'HEAD',
+          mode: 'no-cors',
+          cache: 'no-store',
+          signal: controller.signal
+        });
+      } catch(pingErr) {
+        clearTimeout(timeoutId);
+        // Network error — stop trying
+        showToast('📵 Sin conexión — Se reintentará automáticamente');
+        break;
+      }
+
+      clearTimeout(timeoutId);
+
+      // Internet confirmed — send the payload
+      const sendController = new AbortController();
+      const sendTimeout = setTimeout(() => sendController.abort(), 90000);
 
       await fetch(url, {
         method: 'POST',
         mode: 'no-cors',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: 'data=' + encodeURIComponent(JSON.stringify(queue[i].payload)),
-        signal: controller.signal
+        signal: sendController.signal
       });
 
-      clearTimeout(timeoutId);
+      clearTimeout(sendTimeout);
 
-      // Remove this item from queue immediately after sending
+      // Remove this specific item from queue
       removeFromQueue(queue[i].id);
       sent++;
       await delay(2000);
     } catch(err) {
-      console.error('Retry send failed:', err);
-      // Leave in queue, stop trying
+      console.error('Send failed:', err);
       break;
     }
   }
@@ -2488,43 +2486,29 @@ async function retrySendPending() {
   updatePendingBar();
   const remaining = JSON.parse(localStorage.getItem('sedapal_pending_sync') || '[]').length;
 
-  if (remaining === 0 && sent > 0) {
-    showToast(`✅ ${sent} registro${sent > 1 ? 's' : ''} enviado${sent > 1 ? 's' : ''} correctamente`);
+  if (sent > 0 && remaining === 0) {
+    showToast(`✅ ${sent} registro${sent > 1 ? 's' : ''} enviado${sent > 1 ? 's' : ''}`);
   } else if (sent > 0) {
-    showToast(`⚠️ ${sent} enviado${sent > 1 ? 's' : ''}, ${remaining} aún pendiente${remaining > 1 ? 's' : ''}`);
+    showToast(`⚠️ ${sent} enviado${sent > 1 ? 's' : ''}, ${remaining} pendiente${remaining > 1 ? 's' : ''}`);
   }
 
   _retryLock = false;
 }
 
-// Auto-sync when connection comes back
-window.addEventListener('online', async () => {
-  // Wait and verify real internet before trying
-  await delay(3000);
-  const hasInternet = await checkRealConnection();
-  if (hasInternet) {
-    const queue = JSON.parse(localStorage.getItem('sedapal_pending_sync') || '[]');
-    if (queue.length > 0) {
-      showToast('📶 Conexión recuperada — Enviando ' + queue.length + ' pendiente(s)...');
-      setTimeout(() => retrySendPending(), 1000);
-    }
-  }
+// Auto-sync triggers
+window.addEventListener('online', () => {
+  setTimeout(() => retrySendPending(), 3000);
 });
 
 window.addEventListener('offline', () => {
   showToast('📵 Sin conexión a internet');
 });
 
-// Periodic auto-retry every 60 seconds if there are pending items
-setInterval(async () => {
+// Periodic auto-retry every 30 seconds
+setInterval(() => {
   const queue = JSON.parse(localStorage.getItem('sedapal_pending_sync') || '[]');
-  if (queue.length > 0) {
-    const hasInternet = await checkRealConnection();
-    if (hasInternet) {
-      retrySendPending();
-    }
-  }
-}, 60000);
+  if (queue.length > 0) retrySendPending();
+}, 30000);
 
 // ===== PHOTO HANDLING =====
 const APP_PHOTOS = { 1: null, 2: null, 3: null };
@@ -2559,6 +2543,7 @@ function closePhotoChoice() {
 }
 
 function handlePhoto(slot, input) {
+  closePhotoChoice(); // Ensure modal is closed
   const file = input.files[0];
   if (!file) return;
 
