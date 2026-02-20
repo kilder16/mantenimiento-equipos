@@ -2234,6 +2234,11 @@ function undoTechSignature() {
 
 // ===== SUBMIT =====
 function submitMaintenance() {
+  // Prevent double tap
+  const submitBtn = document.getElementById('submitBtn');
+  if (submitBtn.disabled) return;
+  submitBtn.disabled = true;
+
   const techName = document.getElementById('techName').value.trim();
   const userName = document.getElementById('userName').value.trim();
   const userFichaVal = document.getElementById('userFicha').value.trim();
@@ -2241,11 +2246,11 @@ function submitMaintenance() {
   const obs = document.getElementById('observations')?.value?.trim() || '';
 
   // Validations
-  if (!techName) { showToast('⚠️ Ingrese el nombre del técnico'); document.getElementById('techName').focus(); return; }
-  if (!APP.currentEquipment) { showToast('⚠️ Primero busque un equipo'); return; }
-  if (!userName) { showToast('⚠️ Ingrese el nombre del usuario'); document.getElementById('userName').focus(); return; }
-  if (!status) { showToast('⚠️ Seleccione el estado del mantenimiento'); return; }
-  if (!APP.hasSigned) { showToast('⚠️ Se requiere la firma del usuario'); return; }
+  if (!techName) { showToast('⚠️ Ingrese el nombre del técnico'); document.getElementById('techName').focus(); submitBtn.disabled = false; return; }
+  if (!APP.currentEquipment) { showToast('⚠️ Primero busque un equipo'); submitBtn.disabled = false; return; }
+  if (!userName) { showToast('⚠️ Ingrese el nombre del usuario'); document.getElementById('userName').focus(); submitBtn.disabled = false; return; }
+  if (!status) { showToast('⚠️ Seleccione el estado del mantenimiento'); submitBtn.disabled = false; return; }
+  if (!APP.hasSigned) { showToast('⚠️ Se requiere la firma del usuario'); submitBtn.disabled = false; return; }
 
   // Build the updated equipment with current field values
   const updatedEquipment = { ...APP.currentEquipment };
@@ -2287,6 +2292,7 @@ function submitMaintenance() {
   const offlineMsg = !navigator.onLine ? '\n💾 Sin señal — Se enviará automáticamente al recuperar conexión.' : '';
   document.getElementById('successMessage').textContent = `Equipo ${code} registrado como "${status}" por ${userName}.${offlineMsg}`;
   document.getElementById('successModal').classList.add('active');
+  submitBtn.disabled = false;
 }
 
 // ===== SEND TO GOOGLE SHEETS =====
