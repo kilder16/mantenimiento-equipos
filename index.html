@@ -2283,8 +2283,20 @@ function submitMaintenance() {
   // Generate PDF first (stores base64 in APP.lastPdfBase64)
   exportRecord();
 
-  // Send to Google Sheets (async, runs in background)
-  sendToGoogleSheets(record);
+  // Build payload and ALWAYS save to queue SYNCHRONOUSLY first
+  const payload = buildPayload(record);
+  const queueId = Date.now() + '_' + Math.random().toString(36).substr(2, 6);
+  payload._queueId = queueId;
+
+  try {
+    const queue = JSON.parse(localStorage.getItem('sedapal_pending_sync') || '[]');
+    queue.push({ payload, queuedAt: new Date().toISOString(), id: queueId });
+    localStorage.setItem('sedapal_pending_sync', JSON.stringify(queue));
+    updatePendingBar();
+  } catch(e) {}
+
+  // Try to send in background (will remove from queue if successful)
+  trySendPayload(payload, queueId);
 
   renderHistory();
 
@@ -2294,28 +2306,17 @@ function submitMaintenance() {
   submitBtn.disabled = false;
 }
 
-// ===== SEND TO GOOGLE SHEETS =====
-async function sendToGoogleSheets(record) {
+// Background sender — tries to send and removes from queue on success
+async function trySendPayload(payload, queueId) {
   const url = APP.config.webhookUrl;
-  if (!url) { showToast('⚠️ Configure la URL del Web App en ⚙️ Config'); return; }
+  if (!url) return;
 
-  const payload = buildPayload(record);
-
-  // ALWAYS queue first (synchronous, before any async operation)
-  // This guarantees every record is saved even if multiple calls overlap
-  const queueId = Date.now() + '_' + Math.random().toString(36).substr(2, 6);
-  payload._queueId = queueId;
-  queueForLater(payload, true); // silent=true, no toast yet
-
-  // Now check connectivity asynchronously
   const hasInternet = await checkRealConnection();
-
   if (!hasInternet) {
-    showToast('💾 Sin señal — Registro guardado. Se enviará al recuperar conexión.');
+    showToast('💾 Sin señal — Guardado en cola.');
     return;
   }
 
-  // Try to send
   try {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 90000);
@@ -2329,14 +2330,23 @@ async function sendToGoogleSheets(record) {
     });
 
     clearTimeout(timeoutId);
-
-    // Success — remove from queue
     removeFromQueue(queueId);
-    showToast('☁️ Registro enviado a Google Sheets ✅');
+    showToast('☁️ Registro enviado ✅');
   } catch(err) {
-    console.error('Envío falló:', err);
-    showToast('💾 Registro en cola — Se reenviará automáticamente.');
+    showToast('💾 En cola — Se reenviará automáticamente.');
   }
+}
+
+// sendToGoogleSheets is kept for compatibility but no longer used from submit
+async function sendToGoogleSheets(record) {
+  const url = APP.config.webhookUrl;
+  if (!url) return;
+  const payload = buildPayload(record);
+  try {
+    await fetch(url, { method: 'POST', mode: 'no-cors',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'data=' + encodeURIComponent(JSON.stringify(payload)) });
+  } catch(e) {}
 }
 
 // Real internet check — loads a tiny image (no CORS issues, truly fails without internet)
