@@ -2301,11 +2301,17 @@ async function sendToGoogleSheets(record) {
 
   const payload = buildPayload(record);
 
-  // Real connectivity check (ping a fast endpoint)
+  // ALWAYS queue first (synchronous, before any async operation)
+  // This guarantees every record is saved even if multiple calls overlap
+  const queueId = Date.now() + '_' + Math.random().toString(36).substr(2, 6);
+  payload._queueId = queueId;
+  queueForLater(payload, true); // silent=true, no toast yet
+
+  // Now check connectivity asynchronously
   const hasInternet = await checkRealConnection();
 
   if (!hasInternet) {
-    queueForLater(payload);
+    showToast('💾 Sin señal — Registro guardado. Se enviará al recuperar conexión.');
     return;
   }
 
@@ -2323,10 +2329,13 @@ async function sendToGoogleSheets(record) {
     });
 
     clearTimeout(timeoutId);
+
+    // Success — remove from queue
+    removeFromQueue(queueId);
     showToast('☁️ Registro enviado a Google Sheets ✅');
   } catch(err) {
     console.error('Envío falló:', err);
-    queueForLater(payload);
+    showToast('💾 Registro en cola — Se reenviará automáticamente.');
   }
 }
 
@@ -2382,16 +2391,27 @@ function buildPayload(record) {
 }
 
 // ===== OFFLINE QUEUE =====
-function queueForLater(payload) {
+function queueForLater(payload, silent) {
   try {
     const queue = JSON.parse(localStorage.getItem('sedapal_pending_sync') || '[]');
-    queue.push({ payload, queuedAt: new Date().toISOString() });
+    queue.push({ payload, queuedAt: new Date().toISOString(), id: payload._queueId || Date.now().toString() });
     localStorage.setItem('sedapal_pending_sync', JSON.stringify(queue));
     updatePendingBar();
-    showToast('💾 Sin señal — Registro guardado. Se enviará al recuperar conexión.');
+    if (!silent) {
+      showToast('💾 Sin señal — Registro guardado. Se enviará al recuperar conexión.');
+    }
   } catch(e) {
     console.error('Error saving to queue:', e);
   }
+}
+
+function removeFromQueue(queueId) {
+  try {
+    let queue = JSON.parse(localStorage.getItem('sedapal_pending_sync') || '[]');
+    queue = queue.filter(item => item.id !== queueId);
+    localStorage.setItem('sedapal_pending_sync', JSON.stringify(queue));
+    updatePendingBar();
+  } catch(e) {}
 }
 
 function updatePendingBar() {
@@ -2408,22 +2428,25 @@ function updatePendingBar() {
   }
 }
 
-async function retrySendPending() {
-  const url = APP.config.webhookUrl;
-  if (!url) { showToast('⚠️ Configure la URL del Web App primero'); return; }
+let _retryLock = false;
 
-  // Real connectivity check
+async function retrySendPending() {
+  if (_retryLock) return; // prevent concurrent retries
+  _retryLock = true;
+
+  const url = APP.config.webhookUrl;
+  if (!url) { showToast('⚠️ Configure la URL del Web App primero'); _retryLock = false; return; }
+
   const hasInternet = await checkRealConnection();
-  if (!hasInternet) { showToast('📵 Aún sin conexión real a internet'); return; }
+  if (!hasInternet) { showToast('📵 Aún sin conexión real a internet'); _retryLock = false; return; }
 
   const queue = JSON.parse(localStorage.getItem('sedapal_pending_sync') || '[]');
-  if (queue.length === 0) { showToast('✅ No hay registros pendientes'); updatePendingBar(); return; }
+  if (queue.length === 0) { showToast('✅ No hay registros pendientes'); updatePendingBar(); _retryLock = false; return; }
 
   const bar = document.getElementById('pendingSyncText');
   bar.textContent = `⏳ Enviando ${queue.length} registro${queue.length > 1 ? 's' : ''}...`;
 
   let sent = 0;
-  const failed = [];
 
   for (let i = 0; i < queue.length; i++) {
     bar.textContent = `⏳ Enviando ${i + 1} de ${queue.length}...`;
@@ -2440,22 +2463,28 @@ async function retrySendPending() {
       });
 
       clearTimeout(timeoutId);
+
+      // Remove this item from queue immediately after sending
+      removeFromQueue(queue[i].id);
       sent++;
       await delay(2000);
     } catch(err) {
       console.error('Retry send failed:', err);
-      failed.push(queue[i]);
+      // Leave in queue, stop trying
+      break;
     }
   }
 
-  localStorage.setItem('sedapal_pending_sync', JSON.stringify(failed));
   updatePendingBar();
+  const remaining = JSON.parse(localStorage.getItem('sedapal_pending_sync') || '[]').length;
 
-  if (failed.length === 0) {
+  if (remaining === 0 && sent > 0) {
     showToast(`✅ ${sent} registro${sent > 1 ? 's' : ''} enviado${sent > 1 ? 's' : ''} correctamente`);
-  } else {
-    showToast(`⚠️ ${sent} enviado${sent > 1 ? 's' : ''}, ${failed.length} aún pendiente${failed.length > 1 ? 's' : ''}`);
+  } else if (sent > 0) {
+    showToast(`⚠️ ${sent} enviado${sent > 1 ? 's' : ''}, ${remaining} aún pendiente${remaining > 1 ? 's' : ''}`);
   }
+
+  _retryLock = false;
 }
 
 // Auto-sync when connection comes back
