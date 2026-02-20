@@ -2233,7 +2233,7 @@ function undoTechSignature() {
 }
 
 // ===== SUBMIT =====
-async function submitMaintenance() {
+function submitMaintenance() {
   // Prevent double tap
   const submitBtn = document.getElementById('submitBtn');
   if (submitBtn.disabled) return;
@@ -2283,16 +2283,13 @@ async function submitMaintenance() {
   // Generate PDF first (stores base64 in APP.lastPdfBase64)
   exportRecord();
 
-  // Send to Google Sheets — AWAIT to know if it succeeded or needs queue
-  await sendToGoogleSheets(record);
+  // Send to Google Sheets (async, runs in background)
+  sendToGoogleSheets(record);
 
   renderHistory();
-  updatePendingBar();
 
   const code = record.code;
-  const pendingQueue = JSON.parse(localStorage.getItem('sedapal_pending_sync') || '[]');
-  const offlineMsg = pendingQueue.length > 0 ? '\n💾 Guardado en cola — Se enviará al recuperar señal.' : '';
-  document.getElementById('successMessage').textContent = `Equipo ${code} registrado como "${status}" por ${userName}.${offlineMsg}`;
+  document.getElementById('successMessage').textContent = `Equipo ${code} registrado como "${status}" por ${userName}.`;
   document.getElementById('successModal').classList.add('active');
   submitBtn.disabled = false;
 }
@@ -2304,33 +2301,31 @@ async function sendToGoogleSheets(record) {
 
   const payload = buildPayload(record);
 
-  // ALWAYS save to local backup queue first
-  saveToBackupQueue(payload);
-
-  // Then try to send
-  const sent = await attemptSend(url, payload);
-  if (sent) {
-    // Mark as sent in backup queue (remove it)
-    removeFromBackupQueue(payload);
+  // Check if online
+  if (!navigator.onLine) {
+    queueForLater(payload);
+    return;
   }
-  // If not sent, it stays in backup queue and will show yellow bar
-}
 
-function saveToBackupQueue(payload) {
+  // Try to send
   try {
-    const queue = JSON.parse(localStorage.getItem('sedapal_pending_sync') || '[]');
-    payload._queueId = Date.now() + '_' + Math.random().toString(36).substr(2, 5);
-    queue.push({ payload, queuedAt: new Date().toISOString(), id: payload._queueId });
-    localStorage.setItem('sedapal_pending_sync', JSON.stringify(queue));
-  } catch(e) { console.error('Queue save error:', e); }
-}
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 90000);
 
-function removeFromBackupQueue(payload) {
-  try {
-    let queue = JSON.parse(localStorage.getItem('sedapal_pending_sync') || '[]');
-    queue = queue.filter(item => item.id !== payload._queueId);
-    localStorage.setItem('sedapal_pending_sync', JSON.stringify(queue));
-  } catch(e) { console.error('Queue remove error:', e); }
+    await fetch(url, {
+      method: 'POST',
+      mode: 'no-cors',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'data=' + encodeURIComponent(JSON.stringify(payload)),
+      signal: controller.signal
+    });
+
+    clearTimeout(timeoutId);
+    showToast('☁️ Registro enviado a Google Sheets ✅');
+  } catch(err) {
+    console.error('Envío falló:', err);
+    queueForLater(payload);
+  }
 }
 
 function buildPayload(record) {
@@ -2371,46 +2366,6 @@ function buildPayload(record) {
   payload.PDF_BASE64 = APP.lastPdfBase64 || '';
 
   return payload;
-}
-
-async function attemptSend(url, payload) {
-  const submitBtn = document.getElementById('submitBtn');
-  const originalBtnHTML = submitBtn.innerHTML;
-  submitBtn.disabled = true;
-  submitBtn.innerHTML = '<div class="spinner" style="width:20px;height:20px;border-width:2px;margin:0;display:inline-block;vertical-align:middle;"></div> Enviando...';
-
-  if (!navigator.onLine) {
-    submitBtn.disabled = false;
-    submitBtn.innerHTML = originalBtnHTML;
-    return false;
-  }
-
-  const TIMEOUT_MS = 90000;
-
-  try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_MS);
-
-    await fetch(url, {
-      method: 'POST',
-      mode: 'no-cors',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: 'data=' + encodeURIComponent(JSON.stringify(payload)),
-      signal: controller.signal
-    });
-
-    clearTimeout(timeoutId);
-    showToast('☁️ Registro enviado ✅');
-    submitBtn.disabled = false;
-    submitBtn.innerHTML = originalBtnHTML;
-    return true;
-
-  } catch(err) {
-    console.error('Envío falló:', err);
-    submitBtn.disabled = false;
-    submitBtn.innerHTML = originalBtnHTML;
-    return false;
-  }
 }
 
 // ===== OFFLINE QUEUE =====
