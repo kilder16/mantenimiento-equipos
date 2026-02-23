@@ -2824,7 +2824,9 @@ function exportRecord() {
   const isEsc = /SCANNER|ESCANER/.test(cat);
   const isTab = /TABLET/.test(cat);
   const isMon = /MONITOR/.test(cat);
-  const hasMon = !!(gv('MARCA MONITOR 1') || gv('SERIE MONITOR 1'));
+  const monMarca = gv('MARCA MONITOR 1').toUpperCase();
+  const monSerie = gv('SERIE MONITOR 1').toUpperCase();
+  const hasMon = !!(monMarca && monMarca !== 'NO APLICA' && monMarca !== 'N/A' && monMarca !== '-') || !!(monSerie && monSerie !== 'NO APLICA' && monSerie !== 'N/A' && monSerie !== '-');
 
   // Colors (RGB 0-255)
   const BLU = [0,119,182], BLU2 = [0,95,138], CYAN = [0,180,216];
